@@ -5,6 +5,7 @@ import os
 import glob
 import numpy as np
 from IPython import embed
+from collections import OrderedDict
 from optparse import OptionParser
 from datetime import date, datetime, timedelta
 from VideoRecording import VideoRecording
@@ -15,6 +16,7 @@ from RasPiCamControllerTab import RasPiCamControllerTab
 from Camera import Camera, bgr2rgb, bgr2grayscale
 from default_config import default_template, camera_device_search_range, camera_name_format, frames_per_second, \
     width, height, max_tab_width, min_tab_width, offset_left, offset_top
+from doc import doc
 
 
 # from PIL import Image as image
@@ -44,10 +46,12 @@ Keyboard Shortcuts:
 == OPTIONS ==
 -u --template           -- choose your template by its name
 -k --stop_time          -- define a stop time for your recording; Formats: "HH:MM:SS" and "YY-mm-dd HH:MM:SS"
+-l --recording_length   -- define recording length
 -o --output_directory   -- define the output directory of your recordings
 -s --instant_start      -- start the recording instantly without user input
 -i --idle_screen        -- do not display the video frames; this saves quite some computational power
 -c --color              -- record in color
+-e --segmentation       -- segment recording into short files; enter duration of segment. Format: "HH:MM:SS"
 '''
 
 # #######################################
@@ -56,16 +60,19 @@ Keyboard Shortcuts:
 # TODO video-canvas: full screen does not work properly. why?
 # TODO validation of meta data tabs. Warn, if info is missing!
 # TODO: BW (gray scale) support now hacked via tripling the gray scale values to imitate RGB. Probably local codec issue
+# TODO: add sound?
+# TODO: add help
 
 # ########################################
 
 try:
     from PyQt5 import QtGui, QtCore, QtWidgets
+    from PyQt5.QtCore import Qt, pyqtSignal, pyqtSlot
 except:
     print('Unfortunately, your system misses the PyQt5 packages.')
     quit()
 
-# import os
+
 try:
     import odml
 except:
@@ -81,6 +88,9 @@ except:
 
 
 class Main(QtWidgets.QMainWindow):
+
+    sig = pyqtSignal(int)
+
     def __init__(self, app, options=None, parent=None):
         QtWidgets.QMainWindow.__init__(self, parent)
 
@@ -109,21 +119,25 @@ class Main(QtWidgets.QMainWindow):
         self.setGeometry(offset_left, offset_top, width, height)
         self.setSizePolicy(QtWidgets.QSizePolicy.Maximum, QtWidgets.QSizePolicy.Maximum)
         self.setMinimumSize(width, height)
-        self.setWindowTitle('Bee Video GUI')
+        self.setWindowTitle('Video GUI')
 
         # #######################################
 
-        self.video_recordings = dict()
+        # self.video_recordings = OrderedDict()
 
         # #######################################
         # HANDLE OPTIONS
 
-        default_xml_template = default_template
+        self.default_xml_template = default_template
         self.idle_screen = False
         self.instant_start = False
         self.programmed_stop = False
         self.programmed_stop_datetime = None
         self.start_time = None
+        self.programmed_segmentation = False
+        self.programmed_segmentation_datetime = None
+        self.programmed_recording_length = False
+        self.programmed_recording_length_datetime = False
 
         if options:
             # template selection
@@ -131,8 +145,8 @@ class Main(QtWidgets.QMainWindow):
                 template_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'templates')
                 optional_template = os.path.join(template_path, options.template)
                 if os.path.exists(optional_template):
-                    default_xml_template = optional_template
-                    print('Template chosen: {0:s}'.format(os.path.basename(default_xml_template)))
+                    self.default_xml_template = optional_template
+                    print('Template chosen: {0:s}'.format(os.path.basename(self.default_xml_template)))
                 else:
                     print('Error: chosen template does not exist')
                     quit()
@@ -179,6 +193,7 @@ class Main(QtWidgets.QMainWindow):
             self.instant_start = options.instant_start
             if self.instant_start:
                 print('Instant Start: ON')
+
             self.idle_screen = options.idle_screen
             if self.idle_screen:
                 print('Video Display OFF')
@@ -188,8 +203,53 @@ class Main(QtWidgets.QMainWindow):
                 self.color = True
                 print('Recording in color')
 
+            # programmed stop-time
+            if options.segmentation:
+                try:
+                    a = datetime.strptime(options.segmentation, '%H:%M:%S')
+                    c = datetime(a.year, a.month, a.day, a.hour, a.minute, a.second)
+
+                except ValueError:
+                    pass
+                else:
+                    self.programmed_segmentation = True
+                    self.programmed_segmentation_datetime = c
+
+                if self.programmed_segmentation is not True:
+                    print('Error: allowed stop-time formats are:' '\n"HH:MM:SS" and "YY-mm-dd HH:MM:SS"')
+                    quit()
+                else:
+                    print('Automated segmentation activated: {0:s}'.format(str(self.programmed_segmentation_datetime)))
+
+            if options.recording_length:
+                try:
+                    a = datetime.strptime(options.recording_length, '%H:%M:%S')
+                    c = datetime(a.year, a.month, a.day, a.hour, a.minute, a.second)
+
+                except ValueError:
+                    pass
+                else:
+                    self.programmed_recording_length = True
+                    self.programmed_recording_length_datetime = c
+
+                if self.programmed_recording_length is not True:
+                    print('Error: allowed stop-time formats are:' '\n"HH:MM:SS" and "YY-mm-dd HH:MM:SS"')
+                    quit()
+                else:
+                    print('Recording length set: {0:s}'.format(str(self.programmed_recording_length_datetime)))
+
+        # self.init_layouts()
+        # self.init_UI_action()
+
+    # def init_layouts(self):
+
+        self.init_layout()
+        self.create_menu_bar()
+        self.init_ui_action()
         # #######################################
         # LAYOUTS
+    def init_layout(self):
+
         self.main = QtWidgets.QWidget()
         self.setCentralWidget(self.main)
 
@@ -226,7 +286,7 @@ class Main(QtWidgets.QMainWindow):
 
         # #######################################
         # POPULATE TAB
-        default_template_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'templates', default_xml_template)
+        default_template_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'templates', self.default_xml_template)
         self.populate_metadata_tab(default_template_path)
         self.populate_video_tabs()
         self.populate_controller_tabs()
@@ -265,8 +325,7 @@ class Main(QtWidgets.QMainWindow):
         self.bottom_info_layout.addStretch(0)
 
         # #######################################
-        self.create_menu_bar()
-
+        # self.create_menu_bar()
         # #######################################
         # WORKER THREADS
         # For heavy duty work, which might block the GUI.
@@ -299,6 +358,7 @@ class Main(QtWidgets.QMainWindow):
         # These are necessary to connect GUI elements and instances in various threads.
         # Signals and slots can easily be custom-crafted to meet the needs. Data can be sent easily, too.
 
+    def init_ui_action(self):
         # connect buttons
         self.button_cancel.clicked.connect(self.clicked_cancel)
         self.button_record.clicked.connect(self.clicked_record)
@@ -468,39 +528,50 @@ class Main(QtWidgets.QMainWindow):
     def create_and_start_new_videorecordings(self):
         # @jan: could choose potentially from PIM1, MJPG, MP42, DIV3, DIVX, U263, I263, FLV1
         # works @ mac:  MJPG/.avi
+        # works @ mac:  mp4v/.mp4
         #
         # CV_FOURCC('P','I','M','1')    = MPEG-1 codec
         if self.trial_counter == 0:
             self.check_data_dir()
-        #trial_name = '%s/trial_%04i' % (self.data_dir, self.trial_counter)
+
         trial_name = '{0:s}/trial_{1:04d}'.format(self.data_dir, self.trial_counter)
         self.tags = list()
-        self.video_recordings = {cam_name: (VideoRecording('{0}_{1}.avi'.format(trial_name, cam_name),
-                                                           '{0}_{1}_metadata.dat'.format(trial_name, cam_name),
-                                                           cam.get_resolution(),
-                                                           frames_per_second,
-                                                           'MJPG',
-                                                           color=True)
-                                            if not cam.is_raspicam() else
-                                            RasPiVideoRecording('{0}_{1}.h264'.format(trial_name, cam_name),
-                                                                '{0}_{1}_metadata.dat'.format(trial_name, cam_name),
-                                                                'h264',
-                                                                self.cameras[cam_name]))
-                                 for cam_name, cam in self.cameras.items()}
-        # self.video_recordings = {cam_name: (VideoRecording('{0}_{1}.avi'.format(trial_name, cam_name),
+        self.video_recordings = OrderedDict()
+        # self.video_recordings = {cam_name: (VideoRecording('{0}_{1}.mp4'.format(trial_name, cam_name),
+        #                                                    '{0}_{1}_metadata.dat'.format(trial_name, cam_name),
+        #                                                    cam.get_resolution(),
+        #                                                    frames_per_second,
+        #                                                    'mp4v',
+        #                                                    color=True)
+        #                                     if not cam.is_raspicam() else
+        #                                     RasPiVideoRecording('{0}_{1}.h264'.format(trial_name, cam_name),
         #                                                         '{0}_{1}_metadata.dat'.format(trial_name, cam_name),
-        #                                                         self.cameras[cam_name], codec="MJPG"))
+        #                                                         'h264',
+        #                                                         self.cameras[cam_name]))
         #                          for cam_name, cam in self.cameras.items()}
+        """ Ordered dict instead of normal dict to keep cameras in the same order"""
+        for cam_name, cam in self.cameras.items():
+            if cam.is_raspicam():
+                self.video_recordings[cam_name] = RasPiVideoRecording('{0}_{1}.h264'.format(trial_name, cam_name),
+                                                                      '{0}_{1}_metadata.dat'.format(trial_name, cam_name),
+                                                                      'h264', self.cameras[cam_name])
+            else:
+                self.video_recordings[cam_name] = VideoRecording('{0}_{1}.avi'.format(trial_name, cam_name),
+                                                                  '{0}_{1}_metadata.dat'.format(trial_name, cam_name),
+                                                                  cam.get_resolution(), frames_per_second, 'MJPG',
+                                                                  color=True)
+
+
         print(self.video_recordings)
 
-        # drop timestamp for start or recording
+        """ drop timestamp for start or recording """
         trial_info_filename = '{0:s}/trial_{1:04d}_info.dat'.format(self.data_dir, self.trial_counter)
         self.start_time = datetime.now()
         timestamp = self.start_time.strftime("%Y-%m-%d  %H:%M:%S:%f")[:-3]
         with open(trial_info_filename, 'w') as f:
             f.write("start-time:" + "\t" + timestamp + "\n")
 
-        # display start time
+        """ display start time """
         time_label = 'start-time: {0:s}   ---  running: {1:s}'.format(timestamp, str(datetime.now() - self.start_time)[:-7])
         self.label_time.setText(time_label)
 
@@ -517,7 +588,7 @@ class Main(QtWidgets.QMainWindow):
                 self.trial_counter = np.amax([int(e.split('_')[1]) for e in [ee.split('.')[0] for ee in tmp]])+1
 
     def stop_all_recordings(self):
-        # drop timestamp for stop
+        """ drop timestamp for stop """
         trial_info_filename = '{0:s}/trial_{1:04d}_info.dat'.format(self.data_dir, self.trial_counter)
         with open(trial_info_filename, 'a') as f:
             timestamp = datetime.now().strftime("stop-time:" + "\t" + "%Y-%m-%d  %H:%M:%S:%f"[:-3])
@@ -565,14 +636,14 @@ class Main(QtWidgets.QMainWindow):
     def clicked_tag(self):
         ts = str(datetime.now()).split('.')[0]
         text, ok = QtWidgets.QInputDialog.getText(self, 'Tag data with Event', 'Enter tag comment:')
-        # write tags into .xml (odML) file
+        """ write tags into .xml (odML) file """
         if ok:
             tag_name = 'event_{0:02d}'.format(len(self.event_list))
             e = odml.Section(tag_name, 'event')
             e.append(odml.Property('timestamp', odml.Value(ts, dtype='datetime')))
             e.append(odml.Property('comment', odml.Value(text, dtype='string')))
             self.event_list.append(e)
-        # write tags into the .dat file as pure text
+        """ write tags into the .dat file as pure text """
         trial_info_filename = '{0:s}/trial_{1:04d}_info.dat'.format(self.data_dir, self.trial_counter)
         with open(trial_info_filename, 'a') as f:
             timestamp = datetime.now().strftime(("tag-time:" + "\t" + "%Y-%m-%d  %H:%M:%S:%f")[:-3] + "\t" + text)
@@ -600,9 +671,9 @@ class Main(QtWidgets.QMainWindow):
     def save_metadata(self):
         trial_name = 'trial_{0:04d}'.format(self.trial_counter)
         file_list = [f for f in os.listdir(self.data_dir) if f.startswith(trial_name)]
-        # create a document
+        """ create a document """
         doc = odml.Document()
-        # create dataset section
+        """ create dataset section """
         ds = odml.Section('datasets', 'dataset')
         p = odml.Property('files', None)
         ds.append(p)
@@ -634,7 +705,7 @@ class Main(QtWidgets.QMainWindow):
         writer.write_file('{0}/{1}.xml'.format(self.data_dir, trial_name))
 
     def update_video(self):
-        # check for programmed stop-time
+        """ check for programmed stop-time """
         if self.programmed_stop \
                 and self.programmed_stop_datetime < datetime.now():
             self.stop_all_recordings()
@@ -666,15 +737,29 @@ class Main(QtWidgets.QMainWindow):
                     frame = bgr2rgb(frame)
                 img = QtGui.QImage(frame.data, frame.shape[1], frame.shape[0],
                                      frame.shape[1]*3, QtGui.QImage.Format_RGB888)
-                # self.video_tabs[cam_name].setImage(QtGui.QPixmap.fromImage(iqt.ImageQt(image.fromarray(frame))))
-                # self.video_tabs[cam_name].setImage(QtGui.QPixmap(QtGui.QImage(imago)))
                 self.video_tabs[cam_name].setImage(QtGui.QPixmap(img))
 
         if is_recording:
-            # display start time
+            """# display start time """
             timestamp = self.start_time.strftime("%Y-%m-%d  %H:%M:%S")
             time_label = 'start-time: {0:s}   ---  running: {1:s}'.format(timestamp, str(datetime.now() - self.start_time)[:-7])
             self.label_time.setText(time_label)
+
+            """ segmentation for programmed segment length """
+            if self.programmed_segmentation and datetime.strptime(self.record_timestamp, '%Y-%m-%d %H:%M:%S') + timedelta(
+                seconds=self.programmed_segmentation_datetime.second,
+                minutes=self.programmed_segmentation_datetime.minute,
+                hours=self.programmed_segmentation_datetime.hour) <= datetime.now():
+                self.clicked_stop()
+                self.clicked_record()
+            #TODO: fix recording_length
+            """ check for programmed recording length """
+            if self.programmed_recording_length and datetime.strptime(self.record_timestamp, '%Y-%m-%d %H:%M:%S') + timedelta(
+                    seconds=self.programmed_recording_length_datetime.second,
+                    minutes=self.programmed_recording_length_datetime.minute,
+                    hours=self.programmed_recording_length_datetime.hour) <= datetime.now():
+                self.stop_all_recordings()
+                self.app.exit()
 
             # self.write_times_file()
 
@@ -740,10 +825,12 @@ if __name__ == "__main__":
     parser = OptionParser()
     parser.add_option("-t", "--template", action="store", type="string", dest="template", default='continuous_recording_template.xml')
     parser.add_option("-k", "--stop_time", action="store", type="string", dest="stop_time", default='')
+    parser.add_option("-l", "--recording_length", action="store", type="string", dest="recording_length", default='')
     parser.add_option("-o", "--output_directory", action="store", type="string", dest="output_dir", default='')
     parser.add_option("-s", "--instant_start", action="store_true", dest="instant_start", default=False)
     parser.add_option("-i", "--idle_screen", action="store_true", dest="idle_screen", default=False)
     parser.add_option("-c", "--color", action="store_true", dest="color", default=False)
+    parser.add_option("-e", "--segmentation", action="store", dest="segmentation", default='')
     (options, args) = parser.parse_args(args)
 
     # entering the gui app
